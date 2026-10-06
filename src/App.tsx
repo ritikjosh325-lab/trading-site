@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Header } from '@/components/Header';
 import { ChartHeader } from '@/components/ChartHeader';
 import { CandlestickChart } from '@/components/CandlestickChart';
@@ -18,6 +18,7 @@ import { useSignalAlert } from '@/hooks/useSignalAlert';
 import { useTelegram } from '@/hooks/useTelegram';
 import { useNtfy } from '@/hooks/useNtfy';
 import { useSignalHistory } from '@/hooks/useSignalHistory';
+import { usePWAInstall } from '@/hooks/usePWAInstall';
 import type { SignalMode } from '@/lib/signal';
 import type { ScalpTimeframe, ScalpMode } from '@/lib/scalp';
 import { AlertCircle, Zap, Activity } from 'lucide-react';
@@ -34,58 +35,48 @@ function App() {
 
   const isScalp = tab === 'scalp';
   const orderFlow = useOrderFlow(symbol);
-  const intraday = useMarketData(symbol, interval, mode, orderFlow.imbalance);
-  const scalp = useScalpData(symbol, scalpTf, scalpMode, orderFlow.imbalance);
+  const intraday = useMarketData(symbol, interval, mode, orderFlow.imbalance, orderFlow.institutional);
+  const scalp = useScalpData(symbol, scalpTf, scalpMode, orderFlow.imbalance, orderFlow.institutional);
   const telegram = useTelegram();
   const ntfy = useNtfy();
   const history = useSignalHistory();
+  const pwa = usePWAInstall();
 
   const candles = isScalp ? scalp.candles : intraday.candles;
 
   const activeSignal = isScalp ? scalp.signal : intraday.signal;
   const pulse = useSignalAlert(activeSignal);
 
-  // Track which signals have already been sent to avoid duplicates
-  const lastScalpKeyRef = useRef<Record<string, string>>({});
-  const lastIntradayKeyRef = useRef<Record<string, string>>({});
-
-  // --- Automated alerts + history logging on new actionable scalp signal ---
+  // --- Scalp signal: log + notify only when a new actionable signal appears ---
   const scalpSignal = scalp.signal;
-  if (scalpSignal && isScalp) {
+  const scalpKey = scalpSignal
+    ? `${symbol}_${scalpSignal.action}_${scalpSignal.candleCloseTime}`
+    : null;
+  const lastScalpKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!scalpKey || !scalpSignal || !isScalp) return;
     const isActionable = scalpSignal.action === 'QUICK BUY' || scalpSignal.action === 'QUICK SELL';
-    const signalKey = `${symbol}_${scalpSignal.action}_${scalpSignal.candleCloseTime}`;
-    if (isActionable && signalKey !== lastScalpKeyRef.current[symbol]) {
-      lastScalpKeyRef.current[symbol] = signalKey;
-      const direction = scalpSignal.action === 'QUICK BUY' ? 'LONG' : 'SHORT';
-      history.logSignal({
-        symbol,
-        type: 'scalp',
-        direction,
-        entry: scalpSignal.entry,
-        entryLow: scalpSignal.entryLow,
-        entryHigh: scalpSignal.entryHigh,
-        tp1: scalpSignal.tp1,
-        tp2: scalpSignal.tp2,
-        stopLoss: scalpSignal.stopLoss,
-        candleCloseTime: scalpSignal.candleCloseTime,
-      });
-      if (telegram.isConfigured) {
-        telegram.sendSignalAlert({
-          action: scalpSignal.action,
-          symbol,
-          entryLow: scalpSignal.entryLow,
-          entryHigh: scalpSignal.entryHigh,
-          stopLoss: scalpSignal.stopLoss,
-          tp1: scalpSignal.tp1,
-          tp2: scalpSignal.tp2,
-          confluenceScore: scalpSignal.confluenceScore,
-          confluenceTotal: scalpSignal.checks.length,
-          rrTp1: scalpSignal.rrTp1,
-          rrTp2: scalpSignal.rrTp2,
-        });
-      }
-      ntfy.sendSignalAlert({
-        type: 'scalp',
+    if (!isActionable) return;
+    if (scalpKey === lastScalpKeyRef.current) return;
+    lastScalpKeyRef.current = scalpKey;
+
+    const direction = scalpSignal.action === 'QUICK BUY' ? 'LONG' : 'SHORT';
+    history.logSignal({
+      symbol,
+      type: 'scalp',
+      direction,
+      entry: scalpSignal.entry,
+      entryLow: scalpSignal.entryLow,
+      entryHigh: scalpSignal.entryHigh,
+      tp1: scalpSignal.tp1,
+      tp2: scalpSignal.tp2,
+      stopLoss: scalpSignal.stopLoss,
+      candleCloseTime: scalpSignal.candleCloseTime,
+    });
+
+    if (telegram.isConfigured) {
+      telegram.sendSignalAlert({
         action: scalpSignal.action,
         symbol,
         entryLow: scalpSignal.entryLow,
@@ -95,50 +86,73 @@ function App() {
         tp2: scalpSignal.tp2,
         confluenceScore: scalpSignal.confluenceScore,
         confluenceTotal: scalpSignal.checks.length,
+        rrTp1: scalpSignal.rrTp1,
+        rrTp2: scalpSignal.rrTp2,
       });
     }
-  }
+    ntfy.sendSignalAlert({
+      type: 'scalp',
+      action: scalpSignal.action,
+      symbol,
+      entryLow: scalpSignal.entryLow,
+      entryHigh: scalpSignal.entryHigh,
+      stopLoss: scalpSignal.stopLoss,
+      tp1: scalpSignal.tp1,
+      tp2: scalpSignal.tp2,
+      confluenceScore: scalpSignal.confluenceScore,
+      confluenceTotal: scalpSignal.checks.length,
+    });
+  }, [scalpKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // --- Automated alerts + history logging on new actionable intraday signal ---
+  // --- Intraday signal: log + notify only when a new actionable signal appears ---
   const intradaySignal = intraday.signal;
-  if (intradaySignal && !isScalp) {
-    const isActionable = intradaySignal.action === 'BUY' || intradaySignal.action === 'SELL';
-    const signalKey = `${symbol}_${intradaySignal.action}_${intradaySignal.candleCloseTime}`;
-    if (isActionable && signalKey !== lastIntradayKeyRef.current[symbol]) {
-      lastIntradayKeyRef.current[symbol] = signalKey;
-      const direction = intradaySignal.action === 'BUY' ? 'LONG' : 'SHORT';
-      history.logSignal({
-        symbol,
-        type: 'intraday',
-        direction,
-        entry: intradaySignal.entry,
-        entryLow: intradaySignal.entryLow,
-        entryHigh: intradaySignal.entryHigh,
-        tp1: intradaySignal.tp1,
-        tp2: intradaySignal.tp2,
-        stopLoss: intradaySignal.stopLoss,
-        candleCloseTime: intradaySignal.candleCloseTime,
-      });
-      ntfy.sendSignalAlert({
-        type: 'intraday',
-        action: intradaySignal.action,
-        symbol,
-        entryLow: intradaySignal.entryLow,
-        entryHigh: intradaySignal.entryHigh,
-        stopLoss: intradaySignal.stopLoss,
-        tp1: intradaySignal.tp1,
-        tp2: intradaySignal.tp2,
-        confluenceScore: intradaySignal.confluenceScore,
-        confluenceTotal: intradaySignal.checks.length,
-      });
-    }
-  }
+  const intradayKey = intradaySignal
+    ? `${symbol}_${intradaySignal.action}_${intradaySignal.candleCloseTime}`
+    : null;
+  const lastIntradayKeyRef = useRef<string | null>(null);
 
-  // --- Live outcome tracking: update open signals with live trade prices ---
+  useEffect(() => {
+    if (!intradayKey || !intradaySignal || isScalp) return;
+    const isActionable = intradaySignal.action === 'BUY' || intradaySignal.action === 'SELL';
+    if (!isActionable) return;
+    if (intradayKey === lastIntradayKeyRef.current) return;
+    lastIntradayKeyRef.current = intradayKey;
+
+    const direction = intradaySignal.action === 'BUY' ? 'LONG' : 'SHORT';
+    history.logSignal({
+      symbol,
+      type: 'intraday',
+      direction,
+      entry: intradaySignal.entry,
+      entryLow: intradaySignal.entryLow,
+      entryHigh: intradaySignal.entryHigh,
+      tp1: intradaySignal.tp1,
+      tp2: intradaySignal.tp2,
+      stopLoss: intradaySignal.stopLoss,
+      candleCloseTime: intradaySignal.candleCloseTime,
+    });
+
+    ntfy.sendSignalAlert({
+      type: 'intraday',
+      action: intradaySignal.action,
+      symbol,
+      entryLow: intradaySignal.entryLow,
+      entryHigh: intradaySignal.entryHigh,
+      stopLoss: intradaySignal.stopLoss,
+      tp1: intradaySignal.tp1,
+      tp2: intradaySignal.tp2,
+      confluenceScore: intradaySignal.confluenceScore,
+      confluenceTotal: intradaySignal.checks.length,
+    });
+  }, [intradayKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // --- Live outcome tracking: only when live price changes ---
   const livePrice = orderFlow.lastPrice;
-  if (livePrice != null) {
+
+  useEffect(() => {
+    if (livePrice == null) return;
     history.updateOutcomes({ [symbol]: livePrice });
-  }
+  }, [livePrice, symbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ticker = isScalp ? scalp.ticker : intraday.ticker;
   const loading = isScalp ? scalp.loading : intraday.loading;
@@ -159,6 +173,8 @@ function App() {
         telegramActive={telegram.isConfigured}
         onOpenNtfy={() => ntfy.setModalOpen(true)}
         ntfyActive={ntfy.isConfigured && (ntfy.config.intradayEnabled || ntfy.config.scalpEnabled)}
+        canInstall={pwa.canInstall}
+        onInstall={pwa.promptInstall}
       />
 
       <main className="max-w-[1600px] mx-auto px-4 lg:px-6 py-5 space-y-4">

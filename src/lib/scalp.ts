@@ -1,8 +1,8 @@
 import type { Candle } from './binance';
 import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, type Crossover } from './indicators';
 import type { SentimentSummary, HighImpactEvent } from './news';
-import type { OrderBookImbalance, LiquidityLevel } from './orderbook';
-import { hasBullishSweep, hasBearishSweep } from './orderbook';
+import type { OrderBookImbalance, LiquidityLevel, InstitutionalData } from './orderbook';
+import { hasBullishSweep, hasBearishSweep, emptyInstitutionalData } from './orderbook';
 
 export type ScalpAction = 'QUICK BUY' | 'QUICK SELL' | 'WAIT' | 'EVENT PAUSE' | 'CONFLICT';
 export type ScalpTimeframe = '1m' | '3m' | '5m';
@@ -42,6 +42,7 @@ export interface ScalpSignal {
   orderBookImbalance: OrderBookImbalance | null;
   liquiditySweeps: LiquidityLevel[];
   liquidityGrab: boolean;
+  institutional: InstitutionalData;
   candleCloseTime: number;
 }
 
@@ -69,7 +70,8 @@ export function computeScalpSignal(
   highImpactEvents: HighImpactEvent[] = [],
   mtf15mCandles: Candle[] | null = null,
   orderBookImbalance: OrderBookImbalance | null = null,
-  liquiditySweeps: LiquidityLevel[] = []
+  liquiditySweeps: LiquidityLevel[] = [],
+  institutional: InstitutionalData = emptyInstitutionalData()
 ): ScalpSignal | null {
   if (candles.length < 30) return null;
 
@@ -148,6 +150,7 @@ export function computeScalpSignal(
       orderBookImbalance,
       liquiditySweeps,
       liquidityGrab: false,
+      institutional,
       candleCloseTime: last.time,
     };
   }
@@ -262,6 +265,17 @@ export function computeScalpSignal(
     bullScore += 2;
   }
 
+  // --- CVD (Cumulative Volume Delta) ---
+  const cvdBullish = institutional.cvdRising && institutional.cvd > 0;
+  const cvdBearish = institutional.cvdFalling && institutional.cvd < 0;
+  if (cvdBullish) {
+    reasons.push(`CVD rising (+${institutional.cvd.toFixed(1)}) — aggressive buy absorption`);
+    bullScore += 1.5;
+  } else if (cvdBearish) {
+    reasons.push(`CVD falling (${institutional.cvd.toFixed(1)}) — aggressive sell absorption`);
+    bearScore += 1.5;
+  }
+
   // --- News sentiment ---
   let newsAgrees = true;
   if (sentiment) {
@@ -336,6 +350,28 @@ export function computeScalpSignal(
     finalDirection = 0;
   }
 
+  // --- Open Interest filter: confirm breakout with rising OI ---
+  let oiOk = true;
+  const oiRising = institutional.oiChangePct != null && institutional.oiChangePct > 0.1;
+  const oiFalling = institutional.oiChangePct != null && institutional.oiChangePct < -0.1;
+
+  if (finalDirection > 0 && oiFalling) {
+    oiOk = false;
+    reasons.push(`BLOCKED: QUICK BUY blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakout`);
+    finalDirection = 0;
+  }
+  if (finalDirection < 0 && oiFalling) {
+    oiOk = false;
+    reasons.push(`BLOCKED: QUICK SELL blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakdown`);
+    finalDirection = 0;
+  }
+  if (finalDirection > 0 && oiRising) {
+    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new longs entering, confirms breakout`);
+  }
+  if (finalDirection < 0 && oiRising) {
+    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new shorts entering, confirms breakdown`);
+  }
+
   if (finalDirection === 0 && (action === 'QUICK BUY' || action === 'QUICK SELL')) {
     action = 'CONFLICT';
     confidence = 50;
@@ -344,11 +380,11 @@ export function computeScalpSignal(
     confidence = 50;
   }
 
-  // --- Dynamic ATR stop loss (1.2x - 1.5x ATR) ---
-  const atrSlDist = Math.max(atr * 1.3, price * 0.002);
+  // --- Dynamic ATR stop loss (1.5x ATR for scalp, beyond wick zone) ---
+  const atrSlDist = Math.max(atr * 1.5, price * 0.002);
   const slPct = atrSlDist / price;
-  const tp1Pct = slPct * 1.7;
-  const tp2Pct = slPct * 3.3;
+  const tp1Pct = slPct * 1.5;
+  const tp2Pct = slPct * 2.5;
 
   const entry = price;
   const halfSpread = Math.max(atr * 0.15, price * 0.0008);
@@ -388,6 +424,8 @@ export function computeScalpSignal(
     { label: 'Volume > 1.3x', passed: volumeOk },
     { label: 'Order Book OK', passed: orderBookOk && finalDirection !== 0 },
     { label: 'Liquidity Grab', passed: liquidityGrab && finalDirection !== 0 },
+    { label: 'OI Confirming', passed: oiOk && finalDirection !== 0 },
+    { label: 'CVD Absorption', passed: (cvdBullish || cvdBearish) && finalDirection !== 0 },
   ];
   const confluenceScore = checks.filter((c) => c.passed).length;
 
@@ -425,6 +463,7 @@ export function computeScalpSignal(
     orderBookImbalance,
     liquiditySweeps,
     liquidityGrab,
+    institutional,
     candleCloseTime: last.time,
   };
 }

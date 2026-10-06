@@ -11,11 +11,13 @@ export function RsiChart({ candles, height = 90 }: Props) {
   const padding = { top: 8, right: 64, bottom: 8, left: 8 };
   const width = 1000;
 
+  const safeCandles = Array.isArray(candles) ? candles : [];
+
   const data = useMemo(() => {
-    if (candles.length < 20) return null;
-    const closes = candles.map((c) => c.close);
+    if (safeCandles.length < 20) return null;
+    const closes = safeCandles.map((c) => c.close);
     const rsiArr = rsi(closes, 14);
-    const n = candles.length;
+    const n = safeCandles.length;
     const chartW = width - padding.left - padding.right;
     const chartH = height - padding.top - padding.bottom;
     const x = (i: number) => padding.left + (i / (n - 1)) * chartW;
@@ -33,7 +35,7 @@ export function RsiChart({ candles, height = 90 }: Props) {
     }
 
     return { path, lastVal, x, y, n };
-  }, [candles, height]);
+  }, [safeCandles, height]);
 
   if (!data) return <div className="flex items-center justify-center text-gray-500 text-xs" style={{ height }}>Loading RSI…</div>;
 

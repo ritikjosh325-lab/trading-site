@@ -1,7 +1,8 @@
 import type { Candle } from './binance';
 import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, type Crossover } from './indicators';
 import type { SentimentSummary, HighImpactEvent } from './news';
-import type { OrderBookImbalance } from './orderbook';
+import type { OrderBookImbalance, InstitutionalData } from './orderbook';
+import { emptyInstitutionalData } from './orderbook';
 
 export type Action = 'BUY' | 'SELL' | 'NEUTRAL' | 'EVENT PAUSE' | 'CONFLICT';
 export type SignalMode = 'normal' | 'leverage5x' | 'leverage10x';
@@ -37,6 +38,7 @@ export interface TradeSignal {
   volumeRatio: number;
   aboveEma200: boolean;
   orderBookImbalance: OrderBookImbalance | null;
+  institutional: InstitutionalData;
   candleCloseTime: number;
 }
 
@@ -78,7 +80,8 @@ export function computeSignal(
   sentiment: SentimentSummary,
   mode: SignalMode = 'normal',
   highImpactEvents: HighImpactEvent[] = [],
-  orderBookImbalance: OrderBookImbalance | null = null
+  orderBookImbalance: OrderBookImbalance | null = null,
+  institutional: InstitutionalData = emptyInstitutionalData()
 ): TradeSignal | null {
   if (candles.length < 30) return null;
   const closes = candles.map((c) => c.close);
@@ -136,6 +139,7 @@ export function computeSignal(
       volumeRatio: volRatio,
       aboveEma200,
       orderBookImbalance,
+      institutional,
       candleCloseTime: last.time,
     };
   }
@@ -203,6 +207,19 @@ export function computeSignal(
     }
   }
 
+  // --- CVD (Cumulative Volume Delta) ---
+  const cvdBullish = institutional.cvdRising && institutional.cvd > 0;
+  const cvdBearish = institutional.cvdFalling && institutional.cvd < 0;
+  if (cvdBullish) {
+    reasons.push(`CVD rising (+${institutional.cvd.toFixed(1)}) — aggressive buy absorption`);
+    bullScore += 1.5;
+  } else if (cvdBearish) {
+    reasons.push(`CVD falling (${institutional.cvd.toFixed(1)}) — aggressive sell absorption`);
+    bearScore += 1.5;
+  } else {
+    reasons.push(`CVD neutral (${institutional.cvd.toFixed(1)}) — no aggressive absorption`);
+  }
+
   // --- News sentiment ---
   if (sentiment.label === 'Bullish') {
     reasons.push(`News sentiment bullish (${sentiment.score.toFixed(0)}) — favorable macro backdrop`);
@@ -266,22 +283,10 @@ export function computeSignal(
     direction = 0;
   }
 
-  if (direction !== 0) {
-    action = direction > 0 ? 'BUY' : 'SELL';
-    confidence = Math.min(95, 50 + Math.abs(bullScore - bearScore) * 10);
-    reasons.push(`Execution Range: ${fmtPriceVal(entryLow)} – ${fmtPriceVal(entryHigh)} (1-2 min window to execute)`);
-  } else if (isBuy || isSell) {
-    action = 'CONFLICT';
-    confidence = 50;
-  } else {
-    action = 'NEUTRAL';
-    confidence = 50;
-  }
-
-  // --- Dynamic ATR stop loss ---
-  const slDist = Math.max(atr * 1.3, price * 0.008);
-  const tp1Dist = slDist * 2;
-  const tp2Dist = slDist * 3.6;
+  // --- Dynamic ATR stop loss (2.0x ATR for intraday, beyond wick zone) ---
+  const slDist = Math.max(atr * 2.0, price * 0.008);
+  const tp1Dist = slDist * 1.5;
+  const tp2Dist = slDist * 2.5;
 
   if (mode !== 'normal') {
     const cfg = LEVERAGE_CONFIGS[mode];
@@ -298,9 +303,9 @@ export function computeSignal(
     stopLoss = entry + direction * -slDist;
     tp1 = entry + direction * tp1Dist;
     tp2 = entry + direction * tp2Dist;
-    rrTp1 = 2;
-    rrTp2 = 3.6;
-    riskReward = 2;
+    rrTp1 = 1.5;
+    rrTp2 = 2.5;
+    riskReward = 1.5;
   }
 
   const cfg = mode !== 'normal' ? LEVERAGE_CONFIGS[mode] : null;
@@ -311,6 +316,40 @@ export function computeSignal(
   const leverageRoiTp2 = ((tp2 - entry) / entry) * 100 * leverage * direction;
   const leverageRiskPct = ((entry - stopLoss) / entry) * 100 * leverage * direction;
 
+  // --- Open Interest filter: confirm breakout with rising OI ---
+  let oiOk = true;
+  const oiRising = institutional.oiChangePct != null && institutional.oiChangePct > 0.1;
+  const oiFalling = institutional.oiChangePct != null && institutional.oiChangePct < -0.1;
+
+  if (direction > 0 && oiFalling) {
+    oiOk = false;
+    reasons.push(`BLOCKED: BUY blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakout`);
+    direction = 0;
+  }
+  if (direction < 0 && oiFalling) {
+    oiOk = false;
+    reasons.push(`BLOCKED: SELL blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakdown`);
+    direction = 0;
+  }
+  if (direction > 0 && oiRising) {
+    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new longs entering, confirms breakout`);
+  }
+  if (direction < 0 && oiRising) {
+    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new shorts entering, confirms breakdown`);
+  }
+
+  if (direction !== 0) {
+    action = direction > 0 ? 'BUY' : 'SELL';
+    confidence = Math.min(95, 50 + Math.abs(bullScore - bearScore) * 10);
+    reasons.push(`Execution Range: ${fmtPriceVal(entryLow)} – ${fmtPriceVal(entryHigh)} (1-2 min window to execute)`);
+  } else if (isBuy || isSell) {
+    action = 'CONFLICT';
+    confidence = 50;
+  } else {
+    action = 'NEUTRAL';
+    confidence = 50;
+  }
+
   // --- Confluence checks ---
   const checks: ConfluenceCheck[] = [
     { label: 'Technical Setup', passed: direction !== 0 },
@@ -318,6 +357,8 @@ export function computeSignal(
     { label: '200 EMA Trend', passed: direction !== 0 },
     { label: 'Volume > 1.3x', passed: volumeOk },
     { label: 'Order Book OK', passed: orderBookOk && direction !== 0 },
+    { label: 'OI Confirming', passed: oiOk && direction !== 0 },
+    { label: 'CVD Absorption', passed: (cvdBullish || cvdBearish) && direction !== 0 },
   ];
   const confluenceScore = checks.filter((c) => c.passed).length;
 
@@ -352,6 +393,7 @@ export function computeSignal(
     volumeRatio: volRatio,
     aboveEma200,
     orderBookImbalance,
+    institutional,
     candleCloseTime: last.time,
   };
 }

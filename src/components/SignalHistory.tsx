@@ -1,4 +1,4 @@
-import { TrendingUp, TrendingDown, Minus, Trophy, Clock, Target, XCircle, CheckCircle2, Activity } from 'lucide-react';
+import { TrendingUp, TrendingDown, Trophy, Clock, Target, XCircle, CheckCircle2, Zap, BarChart3 } from 'lucide-react';
 import type { SignalRecord, PerformanceStats, SignalStatus } from '@/hooks/useSignalHistory';
 import { fmtPrice, fmtTime } from '@/lib/format';
 
@@ -17,7 +17,7 @@ export function SignalHistory({ records, stats }: Props) {
           </div>
           <div>
             <h3 className="text-sm font-semibold text-gray-200">Signal History</h3>
-            <p className="text-xs text-gray-500">Past 24 hours · Live outcome tracking</p>
+            <p className="text-xs text-gray-500">Past 30 days · Live outcome tracking</p>
           </div>
         </div>
 
@@ -56,10 +56,10 @@ export function SignalHistory({ records, stats }: Props) {
                 <tr key={r.id} className="border-b border-bg-border/50 hover:bg-bg-hover/30 transition-colors">
                   <td className="px-2 py-2 text-gray-400 font-mono whitespace-nowrap">{fmtTime(r.timestamp)}</td>
                   <td className="px-2 py-2 text-gray-300 font-medium whitespace-nowrap">
-                    {r.symbol.replace('USDT', '/USDT')}
-                    <span className={`ml-1.5 text-[10px] px-1 py-0.5 rounded ${r.type === 'scalp' ? 'bg-accent-cyan/15 text-accent-cyan' : 'bg-accent-blue/15 text-accent-blue'}`}>
-                      {r.type === 'scalp' ? 'SC' : 'IN'}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <TradeTypeBadge type={r.type} />
+                      {r.symbol.replace('USDT', '/USDT')}
+                    </div>
                   </td>
                   <td className="px-2 py-2">
                     <DirectionBadge direction={r.direction} />
@@ -113,6 +113,21 @@ function StatBox({ label, value, color }: { label: string; value: string; color:
       <div className="text-xs text-gray-500">{label}</div>
       <div className={`text-sm font-mono font-bold ${color}`}>{value}</div>
     </div>
+  );
+}
+
+function TradeTypeBadge({ type }: { type: 'intraday' | 'scalp' }) {
+  if (type === 'scalp') {
+    return (
+      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-accent-cyan/15 text-accent-cyan font-semibold text-[10px] whitespace-nowrap flex-shrink-0">
+        <Zap className="w-2.5 h-2.5" /> SCALP
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-accent-amber/15 text-accent-amber font-semibold text-[10px] whitespace-nowrap flex-shrink-0">
+      <BarChart3 className="w-2.5 h-2.5" /> INTRADAY
+    </span>
   );
 }
 

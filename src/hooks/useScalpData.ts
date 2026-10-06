@@ -2,8 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { fetchKlines, fetchTicker, type Candle, type Ticker } from '@/lib/binance';
 import { fetchNews, summarizeSentiment, detectHighImpactEvents, type SentimentSummary, type HighImpactEvent } from '@/lib/news';
 import { computeScalpSignal, type ScalpSignal, type ScalpTimeframe, type ScalpMode } from '@/lib/scalp';
-import type { OrderBookImbalance, LiquidityLevel } from '@/lib/orderbook';
-import { detectLiquiditySweeps } from '@/lib/orderbook';
+import type { OrderBookImbalance, LiquidityLevel, InstitutionalData } from '@/lib/orderbook';
+import { detectLiquiditySweeps, emptyInstitutionalData } from '@/lib/orderbook';
 
 interface ScalpState {
   candles: Candle[];
@@ -13,6 +13,7 @@ interface ScalpState {
   highImpactEvents: HighImpactEvent[];
   orderBookImbalance: OrderBookImbalance | null;
   liquiditySweeps: LiquidityLevel[];
+  institutional: InstitutionalData;
   signal: ScalpSignal | null;
   loading: boolean;
   error: string | null;
@@ -29,6 +30,7 @@ const initialState: ScalpState = {
   highImpactEvents: [],
   orderBookImbalance: null,
   liquiditySweeps: [],
+  institutional: emptyInstitutionalData(),
   signal: null,
   loading: true,
   error: null,
@@ -41,7 +43,7 @@ function isActionable(signal: ScalpSignal | null): boolean {
   return !!signal && (signal.action === 'QUICK BUY' || signal.action === 'QUICK SELL');
 }
 
-export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', mode: ScalpMode = 'normal', orderBookImbalance: OrderBookImbalance | null = null) {
+export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', mode: ScalpMode = 'normal', orderBookImbalance: OrderBookImbalance | null = null, institutional: InstitutionalData = emptyInstitutionalData()) {
   const [state, setState] = useState<ScalpState>(initialState);
   const [paused, setPaused] = useState(false);
   const symbolRef = useRef(symbol);
@@ -52,6 +54,8 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
   modeRef.current = mode;
   const obRef = useRef(orderBookImbalance);
   obRef.current = orderBookImbalance;
+  const instRef = useRef(institutional);
+  instRef.current = institutional;
 
   const lockedSignalRef = useRef<ScalpSignal | null>(null);
   const lockExpiryRef = useRef<number>(0);
@@ -79,7 +83,7 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
 
       let signal: ScalpSignal;
       if (candleChanged || !locked) {
-        signal = computeScalpSignal(candles, tf, currentMode, sentiment, highImpactEvents, mtf15mCandles, obRef.current, sweeps)!;
+        signal = computeScalpSignal(candles, tf, currentMode, sentiment, highImpactEvents, mtf15mCandles, obRef.current, sweeps, instRef.current)!;
         if (isActionable(signal)) {
           lockedSignalRef.current = signal;
           lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -98,6 +102,7 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
         highImpactEvents,
         orderBookImbalance: obRef.current,
         liquiditySweeps: sweeps,
+        institutional: instRef.current,
         signal,
         loading: false,
         error: null,
@@ -123,7 +128,7 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
           return { ...s, ticker, lastUpdate: now };
         }
         const sweeps = detectLiquiditySweeps(s.candles);
-        const signal = computeScalpSignal(s.candles, tf, currentMode, s.sentiment, s.highImpactEvents, s.mtf15mCandles, obRef.current, sweeps);
+        const signal = computeScalpSignal(s.candles, tf, currentMode, s.sentiment, s.highImpactEvents, s.mtf15mCandles, obRef.current, sweeps, instRef.current);
         if (isActionable(signal)) {
           lockedSignalRef.current = signal;
           lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -162,7 +167,7 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
         return { ...s, signal: lockedSignalRef.current };
       }
       const sweeps = detectLiquiditySweeps(s.candles);
-      const signal = computeScalpSignal(s.candles, timeframe, mode, s.sentiment, s.highImpactEvents, s.mtf15mCandles, orderBookImbalance, sweeps);
+      const signal = computeScalpSignal(s.candles, timeframe, mode, s.sentiment, s.highImpactEvents, s.mtf15mCandles, orderBookImbalance, sweeps, institutional);
       if (isActionable(signal)) {
         lockedSignalRef.current = signal;
         lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -171,7 +176,7 @@ export function useScalpData(symbol: string, timeframe: ScalpTimeframe = '1m', m
       }
       return { ...s, liquiditySweeps: sweeps, signal };
     });
-  }, [mode, timeframe, orderBookImbalance]);
+  }, [mode, timeframe, orderBookImbalance, institutional]);
 
   // Clear lock when symbol changes
   useEffect(() => {

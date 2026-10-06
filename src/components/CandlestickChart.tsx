@@ -11,8 +11,10 @@ export function CandlestickChart({ candles, height = 380 }: Props) {
   const padding = { top: 16, right: 64, bottom: 24, left: 8 };
   const width = 1000;
 
+  const safeCandles = Array.isArray(candles) ? candles : [];
+
   const { paths, scales } = useMemo(() => {
-    if (candles.length < 2) return { paths: null, scales: null };
+    if (safeCandles.length < 2) return { paths: null, scales: null };
     const n = candles.length;
     const chartW = width - padding.left - padding.right;
     const chartH = height - padding.top - padding.bottom;
@@ -58,7 +60,7 @@ export function CandlestickChart({ candles, height = 380 }: Props) {
       paths: { ema9Path, ema21Path, candleW, x, y, priceUp, lastPrice, gridLines, n },
       scales: { min, max },
     };
-  }, [candles, height]);
+  }, [safeCandles, height]);
 
   if (!paths) {
     return (
@@ -96,7 +98,7 @@ export function CandlestickChart({ candles, height = 380 }: Props) {
         </g>
       ))}
 
-      {candles.map((c, i) => {
+      {safeCandles.map((c, i) => {
         const cx = x(i);
         const isUp = c.close >= c.open;
         const color = isUp ? '#10b981' : '#ef4444';

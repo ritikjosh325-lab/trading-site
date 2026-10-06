@@ -106,3 +106,21 @@ export function hasBullishSweep(levels: LiquidityLevel[]): boolean {
 export function hasBearishSweep(levels: LiquidityLevel[]): boolean {
   return levels.some((l) => l.type === 'support' && l.swept);
 }
+
+export interface InstitutionalData {
+  openInterest: number | null;
+  oiChangePct: number | null;
+  cvd: number;
+  cvdRising: boolean;
+  cvdFalling: boolean;
+}
+
+export function emptyInstitutionalData(): InstitutionalData {
+  return {
+    openInterest: null,
+    oiChangePct: null,
+    cvd: 0,
+    cvdRising: false,
+    cvdFalling: false,
+  };
+}

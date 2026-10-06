@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { fetchKlines, fetchTicker, type Candle, type Ticker } from '@/lib/binance';
 import { fetchNews, summarizeSentiment, detectHighImpactEvents, type NewsItem, type SentimentSummary, type HighImpactEvent } from '@/lib/news';
 import { computeSignal, type TradeSignal, type SignalMode } from '@/lib/signal';
-import type { OrderBookImbalance } from '@/lib/orderbook';
+import type { OrderBookImbalance, InstitutionalData } from '@/lib/orderbook';
+import { emptyInstitutionalData } from '@/lib/orderbook';
 
 interface MarketState {
   candles: Candle[];
@@ -11,6 +12,7 @@ interface MarketState {
   sentiment: SentimentSummary;
   highImpactEvents: HighImpactEvent[];
   orderBookImbalance: OrderBookImbalance | null;
+  institutional: InstitutionalData;
   signal: TradeSignal | null;
   loading: boolean;
   error: string | null;
@@ -24,6 +26,7 @@ const initialState: MarketState = {
   sentiment: summarizeSentiment([]),
   highImpactEvents: [],
   orderBookImbalance: null,
+  institutional: emptyInstitutionalData(),
   signal: null,
   loading: true,
   error: null,
@@ -36,7 +39,7 @@ function isActionable(signal: TradeSignal | null): boolean {
   return !!signal && (signal.action === 'BUY' || signal.action === 'SELL');
 }
 
-export function useMarketData(symbol: string, interval = '15m', mode: SignalMode = 'normal', orderBookImbalance: OrderBookImbalance | null = null) {
+export function useMarketData(symbol: string, interval = '15m', mode: SignalMode = 'normal', orderBookImbalance: OrderBookImbalance | null = null, institutional: InstitutionalData = emptyInstitutionalData()) {
   const [state, setState] = useState<MarketState>(initialState);
   const [paused, setPaused] = useState(false);
   const symbolRef = useRef(symbol);
@@ -45,6 +48,8 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
   modeRef.current = mode;
   const obRef = useRef(orderBookImbalance);
   obRef.current = orderBookImbalance;
+  const instRef = useRef(institutional);
+  instRef.current = institutional;
 
   const lockedSignalRef = useRef<TradeSignal | null>(null);
   const lockExpiryRef = useRef<number>(0);
@@ -70,7 +75,7 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
 
       let signal: TradeSignal;
       if (candleChanged || !locked) {
-        signal = computeSignal(candles, sentiment, currentMode, highImpactEvents, obRef.current)!;
+        signal = computeSignal(candles, sentiment, currentMode, highImpactEvents, obRef.current, instRef.current)!;
         if (isActionable(signal)) {
           lockedSignalRef.current = signal;
           lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -88,6 +93,7 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
         sentiment,
         highImpactEvents,
         orderBookImbalance: obRef.current,
+        institutional: instRef.current,
         signal,
         loading: false,
         error: null,
@@ -112,7 +118,7 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
         if (locked) {
           return { ...s, ticker, lastUpdate: now };
         }
-        const signal = computeSignal(s.candles, s.sentiment, currentMode, s.highImpactEvents, obRef.current);
+        const signal = computeSignal(s.candles, s.sentiment, currentMode, s.highImpactEvents, obRef.current, instRef.current);
         if (isActionable(signal)) {
           lockedSignalRef.current = signal;
           lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -149,7 +155,7 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
       if (locked && mode === modeRef.current) {
         return { ...s, signal: lockedSignalRef.current };
       }
-      const signal = computeSignal(s.candles, s.sentiment, mode, s.highImpactEvents, orderBookImbalance);
+      const signal = computeSignal(s.candles, s.sentiment, mode, s.highImpactEvents, orderBookImbalance, institutional);
       if (isActionable(signal)) {
         lockedSignalRef.current = signal;
         lockExpiryRef.current = now + SIGNAL_LOCK_MS;
@@ -158,7 +164,7 @@ export function useMarketData(symbol: string, interval = '15m', mode: SignalMode
       }
       return { ...s, signal };
     });
-  }, [mode, orderBookImbalance]);
+  }, [mode, orderBookImbalance, institutional]);
 
   // Clear lock when symbol changes
   useEffect(() => {

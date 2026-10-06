@@ -30,8 +30,8 @@ export interface PerformanceStats {
 }
 
 const STORAGE_KEY = 'cryptoflow_signal_history';
-const MAX_RECORDS = 200;
-const TWENTY_FOUR_H = 24 * 60 * 60 * 1000;
+const MAX_RECORDS = 500;
+const THIRTY_DAYS = 30 * 24 * 60 * 60 * 1000;
 
 function loadHistory(): SignalRecord[] {
   try {
@@ -44,12 +44,17 @@ function loadHistory(): SignalRecord[] {
 }
 
 function saveHistory(records: SignalRecord[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records.slice(0, MAX_RECORDS)));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(records.slice(0, MAX_RECORDS)));
+  } catch {
+    // ignore quota or serialization errors
+  }
 }
 
 function pruneOld(records: SignalRecord[]): SignalRecord[] {
-  const cutoff = Date.now() - TWENTY_FOUR_H;
-  return records.filter((r) => r.timestamp > cutoff);
+  if (!Array.isArray(records)) return [];
+  const cutoff = Date.now() - THIRTY_DAYS;
+  return records.filter((r) => r && typeof r.timestamp === 'number' && r.timestamp > cutoff);
 }
 
 export function useSignalHistory() {

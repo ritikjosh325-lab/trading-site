@@ -1,4 +1,4 @@
-import { Bitcoin, Coins, Bell, Radio } from 'lucide-react';
+import { Bitcoin, Coins, Bell, Radio, Download } from 'lucide-react';
 
 interface Props {
   symbol: string;
@@ -7,6 +7,8 @@ interface Props {
   telegramActive: boolean;
   onOpenNtfy: () => void;
   ntfyActive: boolean;
+  canInstall: boolean;
+  onInstall: () => void;
 }
 
 const SYMBOLS = [
@@ -14,7 +16,7 @@ const SYMBOLS = [
   { value: 'ETHUSDT', label: 'ETH', Icon: Coins },
 ];
 
-export function Header({ symbol, onSymbolChange, onOpenTelegram, telegramActive, onOpenNtfy, ntfyActive }: Props) {
+export function Header({ symbol, onSymbolChange, onOpenTelegram, telegramActive, onOpenNtfy, ntfyActive, canInstall, onInstall }: Props) {
   return (
     <header className="border-b border-bg-border bg-bg-panel/80 backdrop-blur-md sticky top-0 z-50">
       <div className="max-w-[1600px] mx-auto px-4 lg:px-6 py-3 flex items-center justify-between">
@@ -52,6 +54,16 @@ export function Header({ symbol, onSymbolChange, onOpenTelegram, telegramActive,
         </div>
 
         <div className="flex items-center gap-2">
+          {canInstall && (
+            <button
+              onClick={onInstall}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all border bg-accent-blue/15 border-accent-blue/40 text-accent-blue hover:bg-accent-blue/25"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Install App</span>
+            </button>
+          )}
+
           <button
             onClick={onOpenNtfy}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border ${

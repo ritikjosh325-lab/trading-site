@@ -26,7 +26,11 @@ function loadConfig(): NtfyConfig {
 }
 
 function saveConfig(cfg: NtfyConfig) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  } catch {
+    // ignore quota errors
+  }
 }
 
 async function sendNtfy(topic: string, title: string, message: string, tags: string): Promise<boolean> {

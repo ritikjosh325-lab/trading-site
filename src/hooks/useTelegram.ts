@@ -19,7 +19,11 @@ function loadConfig(): TelegramConfig {
 }
 
 function saveConfig(cfg: TelegramConfig) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+  } catch {
+    // ignore quota errors
+  }
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<boolean> {
