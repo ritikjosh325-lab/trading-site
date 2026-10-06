@@ -67,3 +67,15 @@ export function avgVolume(candles: { volume: number }[], period = 20): number {
   const slice = candles.slice(-period);
   return slice.reduce((s, c) => s + c.volume, 0) / slice.length;
 }
+
+export function swingHigh(candles: { high: number }[], lookback = 20): number {
+  if (candles.length === 0) return 0;
+  const slice = candles.slice(-lookback);
+  return Math.max(...slice.map((c) => c.high));
+}
+
+export function swingLow(candles: { low: number }[], lookback = 20): number {
+  if (candles.length === 0) return 0;
+  const slice = candles.slice(-lookback);
+  return Math.min(...slice.map((c) => c.low));
+}

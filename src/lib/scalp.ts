@@ -1,5 +1,5 @@
 import type { Candle } from './binance';
-import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, type Crossover } from './indicators';
+import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, swingHigh, swingLow, type Crossover } from './indicators';
 import type { SentimentSummary, HighImpactEvent } from './news';
 import type { OrderBookImbalance, LiquidityLevel, InstitutionalData } from './orderbook';
 import { hasBullishSweep, hasBearishSweep, emptyInstitutionalData } from './orderbook';
@@ -93,6 +93,19 @@ export function computeScalpSignal(
   const volAvg = avgVolume(candles, 20);
   const volRatio = volAvg > 0 ? last.volume / volAvg : 1;
   const aboveEma200 = price > ema200;
+
+  const ema50Arr = ema(closes, 50);
+  const ema50 = ema50Arr[ema50Arr.length - 1];
+  const swHigh = swingHigh(candles, 20);
+  const swLow = swingLow(candles, 20);
+
+  const recentCandles = candles.slice(-21, -1);
+  const prevLow = recentCandles.length > 0 ? Math.min(...recentCandles.map((c) => c.low)) : swLow;
+  const prevHigh = recentCandles.length > 0 ? Math.max(...recentCandles.map((c) => c.high)) : swHigh;
+  const madeLowerLow = last.low < prevLow;
+  const madeHigherHigh = last.high > prevHigh;
+  const closedBelowEma50 = last.close < ema50;
+  const closedAboveEma50 = last.close > ema50;
 
   // --- Multi-timeframe alignment: 15m trend ---
   let mtfBullish = true;
@@ -316,6 +329,27 @@ export function computeScalpSignal(
     finalDirection = 0;
   }
 
+  // --- Market structure (BOS) confirmation ---
+  let bosOk = false;
+  if (finalDirection < 0) {
+    if (!madeLowerLow || !closedBelowEma50) {
+      reasons.push('BLOCKED: QUICK SELL blocked — no Lower Low + close below EMA50 (no bearish BOS)');
+      finalDirection = 0;
+    } else {
+      bosOk = true;
+      reasons.push('BOS confirmed: Lower Low + 5m close below EMA50 on volume');
+    }
+  }
+  if (finalDirection > 0) {
+    if (!madeHigherHigh || !closedAboveEma50) {
+      reasons.push('BLOCKED: QUICK BUY blocked — no Higher High + close above EMA50 (no bullish BOS)');
+      finalDirection = 0;
+    } else {
+      bosOk = true;
+      reasons.push('BOS confirmed: Higher High + 5m close above EMA50 on volume');
+    }
+  }
+
   // --- MTF alignment enforcement ---
   if (finalDirection > 0 && mtf15mCandles && !mtfBullish) {
     reasons.push('BLOCKED: QUICK BUY blocked — 15m trend not bullish (MTF misalignment)');
@@ -380,8 +414,13 @@ export function computeScalpSignal(
     confidence = 50;
   }
 
-  // --- Dynamic ATR stop loss (1.5x ATR for scalp, beyond wick zone) ---
-  const atrSlDist = Math.max(atr * 1.5, price * 0.002);
+  // --- Dynamic swing + ATR stop loss ---
+  // SHORT: SL above recent swing high + 1.5x ATR
+  // LONG: SL below recent swing low - 1.5x ATR
+  const swingSlLong = swLow - atr * 1.5;
+  const swingSlShort = swHigh + atr * 1.5;
+  const swingSlDist = finalDirection > 0 ? price - swingSlLong : swingSlShort - price;
+  const atrSlDist = Math.max(swingSlDist, atr * 1.5);
   const slPct = atrSlDist / price;
   const tp1Pct = slPct * 1.5;
   const tp2Pct = slPct * 2.5;
@@ -390,11 +429,12 @@ export function computeScalpSignal(
   const halfSpread = Math.max(atr * 0.15, price * 0.0008);
   const entryLow = entry - halfSpread;
   const entryHigh = entry + halfSpread;
-  const stopLoss = entry * (1 + finalDirection * -slPct);
+  const stopLoss = finalDirection > 0 ? swingSlLong : swingSlShort;
   const tp1 = entry * (1 + finalDirection * tp1Pct);
   const tp2 = entry * (1 + finalDirection * tp2Pct);
 
   if (finalDirection !== 0) {
+    reasons.push(`SL at ${fmtPriceVal(stopLoss)} — ${finalDirection > 0 ? 'below swing low' : 'above swing high'} + 1.5x ATR (wick buffer)`);
     reasons.push(`Execution Range: ${fmtPriceVal(entryLow)} – ${fmtPriceVal(entryHigh)} (1-2 min window to execute)`);
   }
 
@@ -420,6 +460,7 @@ export function computeScalpSignal(
     { label: 'Technical Setup', passed: finalDirection !== 0 },
     { label: 'News Sentiment', passed: newsAgrees && finalDirection !== 0 },
     { label: '200 EMA Trend', passed: finalDirection !== 0 },
+    { label: 'BOS + EMA50 Close', passed: bosOk && finalDirection !== 0 },
     { label: 'MTF 15m Aligned', passed: mtfAligned && finalDirection !== 0 },
     { label: 'Volume > 1.3x', passed: volumeOk },
     { label: 'Order Book OK', passed: orderBookOk && finalDirection !== 0 },

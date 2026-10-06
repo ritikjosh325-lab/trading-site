@@ -1,5 +1,5 @@
 import type { Candle } from './binance';
-import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, type Crossover } from './indicators';
+import { ema, rsi, detectCrossover, avgTrueRange, avgVolume, swingHigh, swingLow, type Crossover } from './indicators';
 import type { SentimentSummary, HighImpactEvent } from './news';
 import type { OrderBookImbalance, InstitutionalData } from './orderbook';
 import { emptyInstitutionalData } from './orderbook';
@@ -100,6 +100,20 @@ export function computeSignal(
   const volAvg = avgVolume(candles, 20);
   const volRatio = volAvg > 0 ? last.volume / volAvg : 1;
   const aboveEma200 = price > ema200;
+
+  const ema50Arr = ema(closes, 50);
+  const ema50 = ema50Arr[ema50Arr.length - 1];
+  const swHigh = swingHigh(candles, 20);
+  const swLow = swingLow(candles, 20);
+
+  // --- Market structure: Lower Low / Higher High for BOS ---
+  const recentCandles = candles.slice(-21, -1);
+  const prevLow = recentCandles.length > 0 ? Math.min(...recentCandles.map((c) => c.low)) : swLow;
+  const prevHigh = recentCandles.length > 0 ? Math.max(...recentCandles.map((c) => c.high)) : swHigh;
+  const madeLowerLow = last.low < prevLow;
+  const madeHigherHigh = last.high > prevHigh;
+  const closedBelowEma50 = last.close < ema50;
+  const closedAboveEma50 = last.close > ema50;
 
   const reasons: string[] = [];
   let bullScore = 0;
@@ -258,6 +272,27 @@ export function computeSignal(
     direction = 0;
   }
 
+  // --- Market structure (BOS) confirmation for SHORT/LONG ---
+  let bosOk = false;
+  if (direction < 0) {
+    if (!madeLowerLow || !closedBelowEma50) {
+      reasons.push('BLOCKED: SELL blocked — no Lower Low + close below EMA50 (no bearish BOS confirmation)');
+      direction = 0;
+    } else {
+      bosOk = true;
+      reasons.push('BOS confirmed: Lower Low formed + 5m close below EMA50 on volume');
+    }
+  }
+  if (direction > 0) {
+    if (!madeHigherHigh || !closedAboveEma50) {
+      reasons.push('BLOCKED: BUY blocked — no Higher High + close above EMA50 (no bullish BOS confirmation)');
+      direction = 0;
+    } else {
+      bosOk = true;
+      reasons.push('BOS confirmed: Higher High formed + 5m close above EMA50 on volume');
+    }
+  }
+
   // --- Confluence rule: news must agree ---
   let newsAgrees = true;
   if (direction > 0 && sentiment.label !== 'Bullish') {
@@ -283,8 +318,13 @@ export function computeSignal(
     direction = 0;
   }
 
-  // --- Dynamic ATR stop loss (2.0x ATR for intraday, beyond wick zone) ---
-  const slDist = Math.max(atr * 2.0, price * 0.008);
+  // --- Dynamic swing + ATR stop loss ---
+  // SHORT: SL above recent swing high + 1.5x ATR
+  // LONG: SL below recent swing low - 1.5x ATR
+  const swingSlLong = swLow - atr * 1.5;
+  const swingSlShort = swHigh + atr * 1.5;
+  const swingSlDist = direction > 0 ? entry - swingSlLong : swingSlShort - entry;
+  const slDist = Math.max(swingSlDist, atr * 1.5);
   const tp1Dist = slDist * 1.5;
   const tp2Dist = slDist * 2.5;
 
@@ -300,12 +340,15 @@ export function computeSignal(
       `${cfg.label} leverage: SL at ${(cfg.slPct * 100).toFixed(2)}% limits risk to ${(cfg.slPct * cfg.leverage * 100).toFixed(1)}% loss; liq ≈ ${(cfg.liqPct * 100).toFixed(1)}% adverse move`
     );
   } else {
-    stopLoss = entry + direction * -slDist;
+    stopLoss = direction > 0 ? swingSlLong : swingSlShort;
     tp1 = entry + direction * tp1Dist;
     tp2 = entry + direction * tp2Dist;
     rrTp1 = 1.5;
     rrTp2 = 2.5;
     riskReward = 1.5;
+    if (direction !== 0) {
+      reasons.push(`SL at ${fmtPriceVal(stopLoss)} — ${direction > 0 ? 'below swing low' : 'above swing high'} + 1.5x ATR (wick buffer)`);
+    }
   }
 
   const cfg = mode !== 'normal' ? LEVERAGE_CONFIGS[mode] : null;
@@ -355,6 +398,7 @@ export function computeSignal(
     { label: 'Technical Setup', passed: direction !== 0 },
     { label: 'News Sentiment', passed: newsAgrees && direction !== 0 },
     { label: '200 EMA Trend', passed: direction !== 0 },
+    { label: 'BOS + EMA50 Close', passed: bosOk && direction !== 0 },
     { label: 'Volume > 1.3x', passed: volumeOk },
     { label: 'Order Book OK', passed: orderBookOk && direction !== 0 },
     { label: 'OI Confirming', passed: oiOk && direction !== 0 },
