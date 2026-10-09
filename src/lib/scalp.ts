@@ -44,6 +44,7 @@ export interface ScalpSignal {
   liquidityGrab: boolean;
   institutional: InstitutionalData;
   candleCloseTime: number;
+  smartMoneySpike: boolean;
 }
 
 interface ConfluenceCheck {
@@ -82,6 +83,7 @@ export function computeScalpSignal(
   const rsi7Arr = rsi(closes, 7);
 
   const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
   const price = last.close;
   const ema5 = ema5Arr[ema5Arr.length - 1];
   const ema13 = ema13Arr[ema13Arr.length - 1];
@@ -94,20 +96,15 @@ export function computeScalpSignal(
   const volRatio = volAvg > 0 ? last.volume / volAvg : 1;
   const aboveEma200 = price > ema200;
 
-  const ema50Arr = ema(closes, 50);
-  const ema50 = ema50Arr[ema50Arr.length - 1];
   const swHigh = swingHigh(candles, 20);
   const swLow = swingLow(candles, 20);
 
+  // Recent range for liquidity grab + volume squeeze detection
   const recentCandles = candles.slice(-21, -1);
   const prevLow = recentCandles.length > 0 ? Math.min(...recentCandles.map((c) => c.low)) : swLow;
   const prevHigh = recentCandles.length > 0 ? Math.max(...recentCandles.map((c) => c.high)) : swHigh;
-  const madeLowerLow = last.low < prevLow;
-  const madeHigherHigh = last.high > prevHigh;
-  const closedBelowEma50 = last.close < ema50;
-  const closedAboveEma50 = last.close > ema50;
 
-  // --- Multi-timeframe alignment: 15m trend ---
+  // Multi-timeframe (computed but NOT enforced — scalping bypasses MTF)
   let mtfBullish = true;
   let mtfAligned = true;
   if (mtf15mCandles && mtf15mCandles.length >= 30) {
@@ -116,17 +113,14 @@ export function computeScalpSignal(
     const mtfEma21 = ema(mtfCloses, 21);
     const mtfEma200 = ema(mtfCloses, 200);
     const mtfPrice = mtfCloses[mtfCloses.length - 1];
-    const mtfEma9Last = mtfEma9[mtfEma9.length - 1];
-    const mtfEma21Last = mtfEma21[mtfEma21.length - 1];
-    const mtfEma200Last = mtfEma200[mtfEma200.length - 1];
-    mtfBullish = mtfPrice > mtfEma200Last && mtfEma9Last > mtfEma21Last;
-  const mtfBearish = mtfPrice < mtfEma200Last && mtfEma9Last < mtfEma21Last;
+    mtfBullish = mtfPrice > mtfEma200[mtfEma200.length - 1] && mtfEma9[mtfEma9.length - 1] > mtfEma21[mtfEma21.length - 1];
+    const mtfBearish = mtfPrice < mtfEma200[mtfEma200.length - 1] && mtfEma9[mtfEma9.length - 1] < mtfEma21[mtfEma21.length - 1];
     mtfAligned = mtfBullish || mtfBearish;
   }
 
   const reasons: string[] = [];
 
-  // --- High-impact event lock ---
+  // --- High-impact event lock (still active for safety) ---
   if (highImpactEvents.length > 0) {
     reasons.push(`EVENT PAUSE: ${highImpactEvents.length} high-impact news detected in last 15 min — no trade`);
     return {
@@ -139,21 +133,14 @@ export function computeScalpSignal(
       tp1: price,
       tp2: price,
       vwap: vwapVal,
-      ema5,
-      ema13,
-      ema200,
-      rsi7,
+      ema5, ema13, ema200, rsi7,
       crossover: cross,
       reasons,
-      timeframe,
-      mode,
+      timeframe, mode,
       leverage: 1,
       liquidationPrice: price,
-      leverageRoiTp1: 0,
-      leverageRoiTp2: 0,
-      leverageRiskPct: 0,
-      rrTp1: 0,
-      rrTp2: 0,
+      leverageRoiTp1: 0, leverageRoiTp2: 0, leverageRiskPct: 0,
+      rrTp1: 0, rrTp2: 0,
       eventPause: true,
       confluenceScore: 0,
       checks: [],
@@ -165,308 +152,258 @@ export function computeScalpSignal(
       liquidityGrab: false,
       institutional,
       candleCloseTime: last.time,
+      smartMoneySpike: false,
     };
   }
 
+  // ============================================================
+  // SCALP ENGINE: Pre-Spike & Footprint Orderflow
+  // Bypasses: 200 EMA trend, 15m MTF alignment, News sentiment, BOS
+  // Trigger threshold: 60-65% (any 2-3 triggers match)
+  // ============================================================
+
   let bullScore = 0;
   let bearScore = 0;
+  let smartMoneySpike = false;
 
-  // --- 200 EMA trend filter ---
-  if (aboveEma200) {
-    reasons.push('Price above 200 EMA — macro uptrend, longs preferred');
-    bullScore += 2;
-  } else {
-    reasons.push('Price below 200 EMA — macro downtrend, shorts preferred');
-    bearScore += 2;
+  // --- 1. LIQUIDITY GRAB (Pre-Spike) ---
+  // Candle sweeps previous swing high/low by 0.2%-0.5% and closes back inside the range
+  const sweepPctHigh = ((last.high - prevHigh) / prevHigh) * 100;
+  const sweepPctLow = ((prevLow - last.low) / prevLow) * 100;
+  const sweptHigh = last.high > prevHigh && last.close < prevHigh;
+  const sweptLow = last.low < prevLow && last.close > prevLow;
+  const liquidityGrabHigh = sweptHigh && sweepPctHigh >= 0.2 && sweepPctHigh <= 0.5;
+  const liquidityGrabLow = sweptLow && sweepPctLow >= 0.2 && sweepPctLow <= 0.5;
+
+  if (liquidityGrabHigh) {
+    reasons.push(`LIQUIDITY GRAB: Swept swing high by ${sweepPctHigh.toFixed(2)}% and closed back inside — trapped longs, bearish reversal`);
+    bearScore += 3;
+    smartMoneySpike = true;
+  }
+  if (liquidityGrabLow) {
+    reasons.push(`LIQUIDITY GRAB: Swept swing low by ${sweepPctLow.toFixed(2)}% and closed back inside — trapped shorts, bullish reversal`);
+    bullScore += 3;
+    smartMoneySpike = true;
   }
 
-  // --- 5/13 EMA crossover ---
-  if (cross === 'bullish') {
-    reasons.push('5 EMA crossed above 13 EMA — fast bullish momentum shift');
+  // Also use orderbook-based liquidity sweep detection
+  const bullSweep = hasBullishSweep(liquiditySweeps);
+  const bearSweep = hasBearishSweep(liquiditySweeps);
+  if (bullSweep) {
+    reasons.push('Orderbook Sweep: Resistance swept — false breakout above recent highs, bearish');
+    bearScore += 1.5;
+    smartMoneySpike = true;
+  }
+  if (bearSweep) {
+    reasons.push('Orderbook Sweep: Support swept — false breakdown below recent lows, bullish');
+    bullScore += 1.5;
+    smartMoneySpike = true;
+  }
+  const liquidityGrab = liquidityGrabHigh || liquidityGrabLow || bullSweep || bearSweep;
+
+  // --- 2. VOLUME SQUEEZE (Pre-Spike) ---
+  // Volume > 1.8x 20-period MA within tight range (<0.3%)
+  const rangePct = ((last.high - last.low) / last.low) * 100;
+  const volumeSqueeze = volRatio >= 1.8 && rangePct < 0.3;
+  if (volumeSqueeze) {
+    reasons.push(`VOLUME SQUEEZE: Vol ${volRatio.toFixed(1)}x avg in tight range (${rangePct.toFixed(2)}%) — energy building, breakout imminent`);
+    bullScore += 0.5;
+    bearScore += 0.5;
+    smartMoneySpike = true;
+  }
+
+  // --- 3. FOOTPRINT: DELTA DIVERGENCE ---
+  // Lower Low on price but rising Taker Buy Delta -> Instant Long
+  // Higher High on price but falling Taker Buy Delta (CVD falling) -> Instant Short
+  const madeLowerLow = last.low < prevLow;
+  const madeHigherHigh = last.high > prevHigh;
+  const cvdBullish = institutional.cvdRising && institutional.cvd > 0;
+  const cvdBearish = institutional.cvdFalling && institutional.cvd < 0;
+
+  if (madeLowerLow && cvdBullish) {
+    reasons.push(`DELTA DIVERGENCE: Price made Lower Low but CVD rising (+${institutional.cvd.toFixed(1)}) — buyers absorbing, instant LONG`);
+    bullScore += 3;
+    smartMoneySpike = true;
+  }
+  if (madeHigherHigh && cvdBearish) {
+    reasons.push(`DELTA DIVERGENCE: Price made Higher High but CVD falling (${institutional.cvd.toFixed(1)}) — sellers absorbing, instant SHORT`);
+    bearScore += 3;
+    smartMoneySpike = true;
+  }
+
+  // --- 4. TRAPPED TRADER DETECTION ---
+  // Heavy volume absorbed in wick with reverse candle close
+  // Trapped Shorts in bottom wick (bullish) / Trapped Longs in top wick (bearish)
+  const bodyTop = Math.max(last.open, last.close);
+  const bodyBottom = Math.min(last.open, last.close);
+  const lowerWick = bodyBottom - last.low;
+  const upperWick = last.high - bodyTop;
+  const bodySize = bodyTop - bodyBottom;
+  const isBullishClose = last.close > last.open;
+  const isBearishClose = last.close < last.open;
+  const heavyVol = volRatio >= 1.5;
+
+  if (lowerWick > bodySize * 1.5 && isBullishClose && heavyVol) {
+    reasons.push(`TRAPPED SHORTS: Bottom wick absorbed ${volRatio.toFixed(1)}x volume — shorts trapped below, bullish reversal`);
     bullScore += 2.5;
-  } else if (cross === 'bearish') {
-    reasons.push('5 EMA crossed below 13 EMA — fast bearish momentum shift');
+    smartMoneySpike = true;
+  }
+  if (upperWick > bodySize * 1.5 && isBearishClose && heavyVol) {
+    reasons.push(`TRAPPED LONGS: Top wick absorbed ${volRatio.toFixed(1)}x volume — longs trapped above, bearish reversal`);
     bearScore += 2.5;
+    smartMoneySpike = true;
+  }
+
+  // --- 5. EMA 5/13 crossover (momentum, not a blocker) ---
+  if (cross === 'bullish') {
+    reasons.push('5/13 EMA bullish crossover — momentum shift');
+    bullScore += 1.5;
+  } else if (cross === 'bearish') {
+    reasons.push('5/13 EMA bearish crossover — momentum shift');
+    bearScore += 1.5;
   } else if (ema5 > ema13) {
-    reasons.push('5 EMA above 13 EMA — short-term uptrend');
-    bullScore += 1;
+    bullScore += 0.5;
   } else {
-    reasons.push('5 EMA below 13 EMA — short-term downtrend');
+    bearScore += 0.5;
+  }
+
+  // --- 6. VWAP (contextual, not a blocker) ---
+  const vwapDist = ((price - vwapVal) / vwapVal) * 100;
+  if (price > vwapVal && vwapDist < 0.3) {
+    reasons.push(`VWAP bounce — price just above VWAP (+${vwapDist.toFixed(2)}%)`);
+    bullScore += 1;
+  } else if (price < vwapVal && vwapDist > -0.3) {
+    reasons.push(`VWAP rejection — price just below VWAP (${vwapDist.toFixed(2)}%)`);
     bearScore += 1;
   }
 
-  // --- VWAP ---
-  const vwapDist = ((price - vwapVal) / vwapVal) * 100;
-  if (price > vwapVal) {
-    if (vwapDist < 0.3) {
-      reasons.push(`VWAP bounce — price holding just above VWAP (+${vwapDist.toFixed(2)}%)`);
-      bullScore += 2;
-    } else {
-      reasons.push(`Price above VWAP (+${vwapDist.toFixed(2)}%) — bullish bias`);
-      bullScore += 1;
-    }
-  } else if (price < vwapVal) {
-    if (vwapDist > -0.3) {
-      reasons.push(`VWAP rejection — price pressing just below VWAP (${vwapDist.toFixed(2)}%)`);
-      bearScore += 2;
-    } else {
-      reasons.push(`Price below VWAP (${vwapDist.toFixed(2)}%) — bearish bias`);
-      bearScore += 1;
-    }
-  } else {
-    reasons.push('Price at VWAP — equilibrium, watch for breakout direction');
-  }
-
-  // --- RSI(7) ---
+  // --- 7. RSI(7) (contextual, not a blocker) ---
   if (rsi7 < 30) {
-    reasons.push(`Fast RSI(7) at ${rsi7.toFixed(0)} — oversold bounce setup`);
-    bullScore += 1.5;
+    reasons.push(`RSI(7) at ${rsi7.toFixed(0)} — oversold bounce`);
+    bullScore += 1;
   } else if (rsi7 > 70) {
-    reasons.push(`Fast RSI(7) at ${rsi7.toFixed(0)} — overbought, reversal risk`);
-    bearScore += 1.5;
-  } else if (rsi7 > 55) {
-    reasons.push(`Fast RSI(7) at ${rsi7.toFixed(0)} — bullish momentum`);
-    bullScore += 0.5;
-  } else if (rsi7 < 45) {
-    reasons.push(`Fast RSI(7) at ${rsi7.toFixed(0)} — bearish momentum`);
-    bearScore += 0.5;
-  } else {
-    reasons.push(`Fast RSI(7) at ${rsi7.toFixed(0)} — neutral`);
+    reasons.push(`RSI(7) at ${rsi7.toFixed(0)} — overbought reversal`);
+    bearScore += 1;
   }
 
-  // --- Volume confirmation ---
+  // --- 8. CVD (contextual, not a blocker) ---
+  if (cvdBullish && !(madeLowerLow && cvdBullish)) {
+    reasons.push(`CVD rising (+${institutional.cvd.toFixed(1)}) — buy absorption`);
+    bullScore += 1;
+  } else if (cvdBearish && !(madeHigherHigh && cvdBearish)) {
+    reasons.push(`CVD falling (${institutional.cvd.toFixed(1)}) — sell absorption`);
+    bearScore += 1;
+  }
+
+  // --- 9. Volume confirmation (contextual) ---
   const volumeOk = volRatio >= 1.3;
   if (volumeOk) {
-    reasons.push(`Volume ${volRatio.toFixed(1)}x avg — strong participation confirms entry`);
+    reasons.push(`Volume ${volRatio.toFixed(1)}x avg — participation confirmed`);
   } else {
-    reasons.push(`Volume ${volRatio.toFixed(1)}x avg — below 1.3x threshold, weak confirmation`);
+    reasons.push(`Volume ${volRatio.toFixed(1)}x avg — below 1.3x, weak`);
   }
 
-  // --- MTF alignment ---
-  if (mtf15mCandles && mtf15mCandles.length >= 30) {
-    if (mtfBullish) {
-      reasons.push('15m trend bullish — scalp longs aligned with higher timeframe');
-      bullScore += 1.5;
-    } else {
-      reasons.push('15m trend bearish — scalp shorts aligned with higher timeframe');
-      bearScore += 1.5;
-    }
-  }
-
-  // --- Order book imbalance filter ---
-  let orderBookOk = true;
-  if (orderBookImbalance) {
-    if (orderBookImbalance.blockLong) {
-      reasons.push(`Order Book: Ask wall ${orderBookImbalance.askPct.toFixed(0)}% — institutional resistance blocks LONG`);
-    } else if (orderBookImbalance.blockShort) {
-      reasons.push(`Order Book: Bid wall ${orderBookImbalance.bidPct.toFixed(0)}% — institutional support blocks SHORT`);
-    } else {
-      reasons.push(`Order Book: Bid/Ask ${orderBookImbalance.bidPct.toFixed(0)}/${orderBookImbalance.askPct.toFixed(0)} — balanced`);
-    }
-  }
-
-  // --- Liquidity sweep detection ---
-  const bullishSweep = hasBullishSweep(liquiditySweeps);
-  const bearishSweep = hasBearishSweep(liquiditySweeps);
-  const liquidityGrab = bullishSweep || bearishSweep;
-  if (bullishSweep) {
-    reasons.push('Liquidity Grab: Resistance sweep — false breakout above recent highs, bearish reversal signal');
-    bearScore += 2;
-  }
-  if (bearishSweep) {
-    reasons.push('Liquidity Grab: Support sweep — false breakdown below recent lows, bullish reversal signal');
-    bullScore += 2;
-  }
-
-  // --- CVD (Cumulative Volume Delta) ---
-  const cvdBullish = institutional.cvdRising && institutional.cvd > 0;
-  const cvdBearish = institutional.cvdFalling && institutional.cvd < 0;
-  if (cvdBullish) {
-    reasons.push(`CVD rising (+${institutional.cvd.toFixed(1)}) — aggressive buy absorption`);
-    bullScore += 1.5;
-  } else if (cvdBearish) {
-    reasons.push(`CVD falling (${institutional.cvd.toFixed(1)}) — aggressive sell absorption`);
-    bearScore += 1.5;
-  }
-
-  // --- News sentiment ---
-  let newsAgrees = true;
+  // --- 10. News sentiment (informational only, NOT a blocker) ---
   if (sentiment) {
     if (sentiment.label === 'Bullish') {
-      reasons.push(`News sentiment bullish (${sentiment.score.toFixed(0)}) — favorable backdrop`);
-      bullScore += 1.5;
+      reasons.push(`News bullish (${sentiment.score.toFixed(0)}) — backdrop favorable (not enforced for scalps)`);
+      bullScore += 0.5;
     } else if (sentiment.label === 'Bearish') {
-      reasons.push(`News sentiment bearish (${sentiment.score.toFixed(0)}) — adverse backdrop`);
-      bearScore += 1.5;
-    } else {
-      reasons.push(`News sentiment neutral (${sentiment.score.toFixed(0)}) — no directional bias`);
+      reasons.push(`News bearish (${sentiment.score.toFixed(0)}) — backdrop adverse (not enforced for scalps)`);
+      bearScore += 0.5;
     }
   }
 
+  // --- 11. OI (contextual, NOT a blocker) ---
+  const oiRising = institutional.oiChangePct != null && institutional.oiChangePct > 0.1;
+  if (oiRising) {
+    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new positions entering`);
+    bullScore += 0.5;
+    bearScore += 0.5;
+  }
+
+  // --- DIRECTION & THRESHOLD (60-65% confidence = any 2-3 triggers match) ---
+  let direction = 0;
   let action: ScalpAction = 'WAIT';
   let confidence = 50;
-  const direction = bullScore > bearScore ? 1 : bearScore > bullScore ? -1 : 0;
 
-  if (bullScore > bearScore + 1.5) {
-    action = 'QUICK BUY';
-    confidence = Math.min(95, 50 + (bullScore - bearScore) * 12);
-  } else if (bearScore > bullScore + 1.5) {
-    action = 'QUICK SELL';
-    confidence = Math.min(95, 50 + (bearScore - bullScore) * 12);
+  const scoreDiff = Math.abs(bullScore - bearScore);
+  const dominantSide = bullScore > bearScore ? 1 : bearScore > bullScore ? -1 : 0;
+
+  // Require at least 2-3 strong triggers (score >= 3 total from spike triggers)
+  if (dominantSide !== 0 && scoreDiff >= 2.5) {
+    direction = dominantSide;
+    confidence = Math.min(65, 50 + scoreDiff * 6);
+    action = direction > 0 ? 'QUICK BUY' : 'QUICK SELL';
+
+    if (smartMoneySpike) {
+      confidence = Math.min(65, confidence + 5);
+    }
+
+    reasons.push(`Scalp threshold: ${scoreDiff.toFixed(1)} score differential, ${confidence.toFixed(0)}% confidence (60-65% scalp target)`);
   } else {
+    if (dominantSide !== 0) {
+      reasons.push(`Score differential ${scoreDiff.toFixed(1)} below scalp threshold (2.5) — waiting for 2-3 trigger confluence`);
+    }
+    direction = 0;
     action = 'WAIT';
     confidence = 50;
   }
 
-  // --- 200 EMA trend filter enforcement ---
-  let finalDirection = direction;
-  if (finalDirection > 0 && !aboveEma200) {
-    reasons.push('BLOCKED: QUICK BUY blocked — price below 200 EMA (counter-trend)');
-    finalDirection = 0;
-  }
-  if (finalDirection < 0 && aboveEma200) {
-    reasons.push('BLOCKED: QUICK SELL blocked — price above 200 EMA (counter-trend)');
-    finalDirection = 0;
-  }
+  // --- SL: Rejection wick tip + tight buffer ---
+  // LONG: SL below the wick low of the signal candle - small buffer
+  // SHORT: SL above the wick high of the signal candle + small buffer
+  const wickBuffer = Math.max(atr * 0.3, price * 0.001);
+  const slLong = last.low - wickBuffer;
+  const slShort = last.high + wickBuffer;
+  const stopLoss = direction > 0 ? slLong : slShort;
+  const slDist = direction > 0 ? price - stopLoss : stopLoss - price;
 
-  // --- Market structure (BOS) confirmation ---
-  let bosOk = false;
-  if (finalDirection < 0) {
-    if (!madeLowerLow || !closedBelowEma50) {
-      reasons.push('BLOCKED: QUICK SELL blocked — no Lower Low + close below EMA50 (no bearish BOS)');
-      finalDirection = 0;
-    } else {
-      bosOk = true;
-      reasons.push('BOS confirmed: Lower Low + 5m close below EMA50 on volume');
-    }
-  }
-  if (finalDirection > 0) {
-    if (!madeHigherHigh || !closedAboveEma50) {
-      reasons.push('BLOCKED: QUICK BUY blocked — no Higher High + close above EMA50 (no bullish BOS)');
-      finalDirection = 0;
-    } else {
-      bosOk = true;
-      reasons.push('BOS confirmed: Higher High + 5m close above EMA50 on volume');
-    }
-  }
-
-  // --- MTF alignment enforcement ---
-  if (finalDirection > 0 && mtf15mCandles && !mtfBullish) {
-    reasons.push('BLOCKED: QUICK BUY blocked — 15m trend not bullish (MTF misalignment)');
-    finalDirection = 0;
-  }
-  if (finalDirection < 0 && mtf15mCandles && mtfBullish) {
-    reasons.push('BLOCKED: QUICK SELL blocked — 15m trend not bearish (MTF misalignment)');
-    finalDirection = 0;
-  }
-
-  // --- Confluence rule: news must agree ---
-  if (finalDirection > 0 && sentiment && sentiment.label !== 'Bullish') {
-    newsAgrees = false;
-    reasons.push('CONFLICT: QUICK BUY requires bullish news sentiment (>60%) — disagreement triggers WAIT');
-    finalDirection = 0;
-  }
-  if (finalDirection < 0 && sentiment && sentiment.label !== 'Bearish') {
-    newsAgrees = false;
-    reasons.push('CONFLICT: QUICK SELL requires bearish news sentiment (>60%) — disagreement triggers WAIT');
-    finalDirection = 0;
-  }
-
-  // --- Order book imbalance enforcement ---
-  if (finalDirection > 0 && orderBookImbalance?.blockLong) {
-    orderBookOk = false;
-    reasons.push('BLOCKED: QUICK BUY blocked — ask wall > 65% (heavy institutional resistance)');
-    finalDirection = 0;
-  }
-  if (finalDirection < 0 && orderBookImbalance?.blockShort) {
-    orderBookOk = false;
-    reasons.push('BLOCKED: QUICK SELL blocked — bid wall > 65% (heavy institutional support)');
-    finalDirection = 0;
-  }
-
-  // --- Open Interest filter: confirm breakout with rising OI ---
-  let oiOk = true;
-  const oiRising = institutional.oiChangePct != null && institutional.oiChangePct > 0.1;
-  const oiFalling = institutional.oiChangePct != null && institutional.oiChangePct < -0.1;
-
-  if (finalDirection > 0 && oiFalling) {
-    oiOk = false;
-    reasons.push(`BLOCKED: QUICK BUY blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakout`);
-    finalDirection = 0;
-  }
-  if (finalDirection < 0 && oiFalling) {
-    oiOk = false;
-    reasons.push(`BLOCKED: QUICK SELL blocked — Open Interest falling (${institutional.oiChangePct!.toFixed(2)}%), no new positions fueling breakdown`);
-    finalDirection = 0;
-  }
-  if (finalDirection > 0 && oiRising) {
-    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new longs entering, confirms breakout`);
-  }
-  if (finalDirection < 0 && oiRising) {
-    reasons.push(`OI rising (+${institutional.oiChangePct!.toFixed(2)}%) — new shorts entering, confirms breakdown`);
-  }
-
-  if (finalDirection === 0 && (action === 'QUICK BUY' || action === 'QUICK SELL')) {
-    action = 'CONFLICT';
-    confidence = 50;
-  } else if (finalDirection === 0) {
-    action = 'WAIT';
-    confidence = 50;
-  }
-
-  // --- Dynamic swing + ATR stop loss ---
-  // SHORT: SL above recent swing high + 1.5x ATR
-  // LONG: SL below recent swing low - 1.5x ATR
-  const swingSlLong = swLow - atr * 1.5;
-  const swingSlShort = swHigh + atr * 1.5;
-  const swingSlDist = finalDirection > 0 ? price - swingSlLong : swingSlShort - price;
-  const atrSlDist = Math.max(swingSlDist, atr * 1.5);
-  const slPct = atrSlDist / price;
-  const tp1Pct = slPct * 1.5;
-  const tp2Pct = slPct * 2.5;
-
+  // --- Targets: Quick 1:1.5 to 1:2 R:R ---
+  const tp1Dist = slDist * 1.5;
+  const tp2Dist = slDist * 2.0;
   const entry = price;
-  const halfSpread = Math.max(atr * 0.15, price * 0.0008);
+  const halfSpread = Math.max(atr * 0.1, price * 0.0005);
   const entryLow = entry - halfSpread;
   const entryHigh = entry + halfSpread;
-  const stopLoss = finalDirection > 0 ? swingSlLong : swingSlShort;
-  const tp1 = entry * (1 + finalDirection * tp1Pct);
-  const tp2 = entry * (1 + finalDirection * tp2Pct);
+  const tp1 = entry + direction * tp1Dist;
+  const tp2 = entry + direction * tp2Dist;
 
-  if (finalDirection !== 0) {
-    reasons.push(`SL at ${fmtPriceVal(stopLoss)} — ${finalDirection > 0 ? 'below swing low' : 'above swing high'} + 1.5x ATR (wick buffer)`);
-    reasons.push(`Execution Range: ${fmtPriceVal(entryLow)} – ${fmtPriceVal(entryHigh)} (1-2 min window to execute)`);
-  }
-
+  const slPct = slDist / price;
+  const tp1Pct = tp1Dist / price;
+  const tp2Pct = tp2Dist / price;
   const rrTp1 = tp1Pct / slPct;
   const rrTp2 = tp2Pct / slPct;
+
+  if (direction !== 0) {
+    reasons.push(`SL at ${fmtPriceVal(stopLoss)} — ${direction > 0 ? 'below rejection wick low' : 'above rejection wick high'} + tight buffer`);
+    reasons.push(`Target: 1:${rrTp1.toFixed(1)} to 1:${rrTp2.toFixed(1)} R:R — quick scalp exit`);
+    reasons.push(`Execution Range: ${fmtPriceVal(entryLow)} – ${fmtPriceVal(entryHigh)} (execute immediately)`);
+  }
 
   const cfg = mode !== 'normal' ? SCALP_LEVERAGE_CONFIGS[mode] : null;
   const leverage = cfg ? cfg.leverage : 1;
   const liqPctVal = cfg ? cfg.liqPct : 0;
-  const liquidationPrice = entry * (1 + finalDirection * -liqPctVal);
-  const leverageRoiTp1 = ((tp1 - entry) / entry) * 100 * leverage * finalDirection;
-  const leverageRoiTp2 = ((tp2 - entry) / entry) * 100 * leverage * finalDirection;
-  const leverageRiskPct = ((entry - stopLoss) / entry) * 100 * leverage * finalDirection;
+  const liquidationPrice = entry * (1 + direction * -liqPctVal);
+  const leverageRoiTp1 = ((tp1 - entry) / entry) * 100 * leverage * direction;
+  const leverageRoiTp2 = ((tp2 - entry) / entry) * 100 * leverage * direction;
+  const leverageRiskPct = ((entry - stopLoss) / entry) * 100 * leverage * direction;
 
-  if (cfg) {
+  if (cfg && direction !== 0) {
     reasons.push(
       `${cfg.label} leverage: SL at ${(slPct * 100).toFixed(2)}% limits risk to ${Math.abs(leverageRiskPct).toFixed(1)}% loss; liq ≈ ${(cfg.liqPct * 100).toFixed(1)}% adverse move`
     );
   }
 
-  // --- Confluence checks ---
+  // --- Scalp confluence checks (lightweight — NOT 8/8 enforcement) ---
   const checks: ConfluenceCheck[] = [
-    { label: 'Technical Setup', passed: finalDirection !== 0 },
-    { label: 'News Sentiment', passed: newsAgrees && finalDirection !== 0 },
-    { label: '200 EMA Trend', passed: finalDirection !== 0 },
-    { label: 'BOS + EMA50 Close', passed: bosOk && finalDirection !== 0 },
-    { label: 'MTF 15m Aligned', passed: mtfAligned && finalDirection !== 0 },
+    { label: 'Liquidity Grab', passed: liquidityGrab },
+    { label: 'Volume Squeeze', passed: volumeSqueeze },
+    { label: 'Delta Divergence', passed: (madeLowerLow && cvdBullish) || (madeHigherHigh && cvdBearish) },
+    { label: 'Trapped Traders', passed: (lowerWick > bodySize * 1.5 && isBullishClose && heavyVol) || (upperWick > bodySize * 1.5 && isBearishClose && heavyVol) },
+    { label: 'EMA 5/13 Cross', passed: cross !== 'none' },
+    { label: 'CVD Absorption', passed: cvdBullish || cvdBearish },
     { label: 'Volume > 1.3x', passed: volumeOk },
-    { label: 'Order Book OK', passed: orderBookOk && finalDirection !== 0 },
-    { label: 'Liquidity Grab', passed: liquidityGrab && finalDirection !== 0 },
-    { label: 'OI Confirming', passed: oiOk && finalDirection !== 0 },
-    { label: 'CVD Absorption', passed: (cvdBullish || cvdBearish) && finalDirection !== 0 },
   ];
   const confluenceScore = checks.filter((c) => c.passed).length;
 
@@ -480,21 +417,14 @@ export function computeScalpSignal(
     tp1,
     tp2,
     vwap: vwapVal,
-    ema5,
-    ema13,
-    ema200,
-    rsi7,
+    ema5, ema13, ema200, rsi7,
     crossover: cross,
     reasons,
-    timeframe,
-    mode,
+    timeframe, mode,
     leverage,
     liquidationPrice,
-    leverageRoiTp1,
-    leverageRoiTp2,
-    leverageRiskPct,
-    rrTp1,
-    rrTp2,
+    leverageRoiTp1, leverageRoiTp2, leverageRiskPct,
+    rrTp1, rrTp2,
     eventPause: false,
     confluenceScore,
     checks,
@@ -506,6 +436,7 @@ export function computeScalpSignal(
     liquidityGrab,
     institutional,
     candleCloseTime: last.time,
+    smartMoneySpike,
   };
 }
 

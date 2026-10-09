@@ -37,6 +37,7 @@ export function ScalpSignalCard({ signal, symbol, timeframe, onTimeframeChange, 
   const isConflict = signal.action === 'CONFLICT';
   const isLeverage = mode !== 'normal';
   const leverageLabel = mode === 'leverage10x' ? '10x' : mode === 'leverage5x' ? '5x' : '';
+  const showSpikeBadge = signal.smartMoneySpike && (isBuy || isSell);
 
   const actionColor = isBuy ? 'text-accent-green' : isSell ? 'text-accent-red' : 'text-accent-amber';
   const actionBg = isBuy ? 'bg-accent-green/10 border-accent-green/30' : isSell ? 'bg-accent-red/10 border-accent-red/30' : 'bg-accent-amber/10 border-accent-amber/30';
@@ -66,6 +67,14 @@ export function ScalpSignalCard({ signal, symbol, timeframe, onTimeframeChange, 
           {pulse && <span className="ml-1 text-xs text-accent-amber animate-ping">NEW</span>}
         </div>
       </div>
+
+      {/* Smart Money Spike Badge */}
+      {showSpikeBadge && (
+        <div className="mb-3 px-3 py-2 rounded-lg flex items-center gap-2 text-xs font-bold bg-gradient-to-r from-accent-amber/20 to-accent-cyan/20 border border-accent-amber/40 text-accent-amber animate-pulse">
+          <Zap className="w-4 h-4" />
+          SMART MONEY SPIKE / FOOTPRINT INCOMING
+        </div>
+      )}
 
       {/* Market Status Banner */}
       <div className={`mb-3 px-3 py-2 rounded-lg flex items-center gap-2 text-xs font-semibold ${
@@ -135,7 +144,7 @@ export function ScalpSignalCard({ signal, symbol, timeframe, onTimeframeChange, 
         <div className="panel-raised p-3">
           <div className="flex items-center gap-1.5 mb-1">
             <Shield className="w-3 h-3 text-accent-red" />
-            <span className="text-xs text-gray-500">Stop Loss (ATR)</span>
+            <span className="text-xs text-gray-500">Stop Loss (Wick)</span>
           </div>
           <div className="font-mono font-semibold text-accent-red">${fmtPrice(signal.stopLoss)}</div>
           <div className="text-xs text-gray-600 font-mono">{slPct >= 0 ? '+' : ''}{slPct.toFixed(2)}%</div>
@@ -269,7 +278,7 @@ export function ScalpSignalCard({ signal, symbol, timeframe, onTimeframeChange, 
 
       {isWait && (
         <div className="mt-3 px-3 py-2 bg-accent-amber/5 border border-accent-amber/20 rounded-lg text-xs text-accent-amber">
-          No scalp setup detected. Waiting for 5/13 EMA crossover + VWAP alignment + 200 EMA trend + volume confirmation + MTF alignment.
+          No pre-spike setup detected. Waiting for liquidity grab + volume squeeze + delta divergence + trapped trader confirmation.
         </div>
       )}
 
